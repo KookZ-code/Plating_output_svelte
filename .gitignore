@@ -1,0 +1,47 @@
+# ─── SvelteKit ───────────────────────────────────────────────────
+.svelte-kit/
+build/
+
+# ─── Dependencies ────────────────────────────────────────────────
+node_modules/
+
+# ─── Environment ─────────────────────────────────────────────────
+# Never commit real env values — only .env.example
+.env
+.env.*
+!.env.example
+
+# ─── Testing ─────────────────────────────────────────────────────
+/test-results/
+/playwright-report/
+/playwright/.cache/
+coverage/
+
+# ─── Editor ──────────────────────────────────────────────────────
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ─── OS ──────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── TypeScript ──────────────────────────────────────────────────
+*.tsbuildinfo
+
+# ─── Logs ────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ─── IIS / Windows ───────────────────────────────────────────────
+web.config
