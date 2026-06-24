@@ -1,343 +1,410 @@
-<!-- src/routes/+page.svelte — Landing/Showcase page (Microchip Industrial Light) -->
+<!--
+  Plating Output Monitor — main dashboard page.
+  Mirrors Wire Bond dashboard: header / KPIs / hourly chart / drill-down panels.
+-->
 <script lang="ts">
-  type TechCard = {
-    layer: string;
-    name: string;
-    version: string;
-    accent: 'orange' | 'blue' | 'green' | 'red';
-  };
+  import { base } from '$app/paths';
+  import { onMount } from 'svelte';
+  import type {
+    Shift,
+    PlatingDailySummary,
+    PlatingHourlyResponse,
+    PlatingPackageRow,
+    PlatingMachineDrillRow,
+    PlatingKpis,
+    WipHistoryResponse,
+    MachineStatusResponse,
+  } from '$lib/types/plating';
+  import { epNum } from '$lib/utils/epNum';
 
-  type Feature = {
-    title: string;
-    body: string;
-  };
+  import DashboardHeader from '$lib/components/DashboardHeader.svelte';
+  import KpiCards from '$lib/components/KpiCards.svelte';
+  import MainChart from '$lib/components/MainChart.svelte';
+  import PackagePanel from '$lib/components/PackagePanel.svelte';
+  import MachineTable from '$lib/components/MachineTable.svelte';
 
-  const techStack: TechCard[] = [
-    { layer: 'Frontend', name: 'SvelteKit + Svelte 5', version: 'SK 2.x / Svelte 5.x', accent: 'orange' },
-    { layer: 'Backend', name: 'Rust + Axum', version: 'Axum 0.8.x', accent: 'blue' },
-    { layer: 'Database', name: 'SQLite / PostgreSQL', version: 'SQLx 0.8.x', accent: 'green' },
-    { layer: 'Deployment', name: 'IIS on Windows Server', version: 'IIS 10+', accent: 'red' },
-  ];
+  const REFRESH_MS = 5 * 60 * 1000;
 
-  const features: Feature[] = [
-    {
-      title: 'Type-Safe API Contract',
-      body: 'Consistent response shape across every endpoint. Rust structs map directly to TypeScript interfaces — no drift between server and client.',
-    },
-    {
-      title: 'IIS-Ready Deploy',
-      body: 'Frontend ships via sveltekit-adapter-iis with auto-generated web.config. Rust binary runs as a Windows Service behind ARR reverse proxy.',
-    },
-    {
-      title: 'SvelteKit 5 Runes',
-      body: 'Modern reactivity with $state, $derived, and $effect. No legacy stores. Strict TypeScript with zero any throughout the codebase.',
-    },
-  ];
+  // ── Filter state ───────────────────────────────────────────────────────────
+  // Night shift date convention: "Jun 22 N" = Jun 21 19:00 → Jun 22 07:00
+  //   (API stores Night shift under the MORNING date, i.e., date = when shift ENDS)
+  // Auto-select the most recently completed shift:
+  //   07:00-19:00 (Day shift running)  → last completed = Night shift of today  → date=today, shift=N
+  //   19:00-07:00 (Night shift running) → last completed = Day shift of today    → date=today, shift=D
+  function defaultDateShift(): { date: string; shift: Shift } {
+    const h = new Date().getHours();
+    const isDayShift = h >= 7 && h < 19;
+    return isDayShift
+      ? { date: todayStr(), shift: 'N' }  // today's Night = last night (DateStart=yesterday internally)
+      : { date: todayStr(), shift: 'D' }; // today's Day   = today's day shift
+  }
+  const { date: _initDate, shift: _initShift } = defaultDateShift();
+  let date = $state(_initDate);
+  let shift = $state<Shift>(_initShift);
+  let process = $state('Plate');
+  let site = $state('MTAI');
+
+  // ── Data state ─────────────────────────────────────────────────────────────
+  let summary = $state<PlatingDailySummary | null>(null);
+  let hourly = $state<PlatingHourlyResponse | null>(null);
+  let wipHistory = $state<WipHistoryResponse | null>(null);
+  let machineStatus = $state<MachineStatusResponse | null>(null);
+  let loading = $state(false);
+  let lastUpdated = $state('Loading…');
+  let noDataMsg = $state<string | null>(null);  // shown when API returns 0 records
+
+  // ── Drill-down state ───────────────────────────────────────────────────────
+  let selectedHour = $state<number | null>(null);
+  let selectedPkg = $state<string | null>(null);
+  let selectedMachine = $state<string | null>(null);
+  let packageRows = $state<PlatingPackageRow[] | null>(null);
+  let machineRows = $state<PlatingMachineDrillRow[] | null>(null);
+
+  // ── Derived KPIs ───────────────────────────────────────────────────────────
+  // totalShift = sum of all package cumulative values at the cutoff hour
+  // This exactly matches what the chart shows as the total at the last visible bar.
+  const realtimeTotal = $derived(() => {
+    if (!hourly) return 0;
+    const ci = cutoffIndex();
+    if (ci < 0) return 0;
+    return Object.values(hourly.packages).reduce(
+      (sum, arr) => sum + (arr[ci] ?? 0),
+      0
+    );
+  });
+
+  const kpis = $derived<PlatingKpis | null>(
+    summary === null
+      ? null
+      : {
+          totalShift: realtimeTotal(),
+          achievementPct: summary.targetShift > 0
+            ? (realtimeTotal() / summary.targetShift) * 100
+            : null,
+          targetShift: summary.targetShift,
+          activeMachines: summary.machineCount,
+          otherShiftTotal: shift === 'D' ? summary.totalNight : summary.totalDay,
+          dailyTotal: realtimeTotal() + (shift === 'D' ? summary.totalNight : summary.totalDay),
+          shift,
+        }
+  );
+
+  // Cutoff index: last hour that has started in the current shift.
+  // For a past date the shift is fully complete → show all hours.
+  // For today, compute based on current time and shift type.
+  const cutoffIndex = $derived(() => {
+    if (!hourly) return -1;
+    const ALL = hourly.hours.length - 1;
+
+    const now = new Date();
+    const todayDate = fmt(now);
+    // Past date → entire shift is done
+    if (date < todayDate) return ALL;
+
+    const nowH = now.getHours();
+
+    if (shift === 'D') {
+      // Day shift 07:00-19:00: straight forward
+      const idx = hourly.hours.findIndex((h) => parseInt(h.split(':')[0], 10) > nowH);
+      return idx === -1 ? ALL : idx - 1;
+    } else {
+      // Night shift 19:00-07:00 spanning midnight
+      if (nowH >= 7 && nowH < 19) return ALL;   // day time → night shift ended
+      if (nowH >= 19) {
+        // Evening: shift in progress, find position in 19–23 range
+        const idx = hourly.hours.findIndex((h) => parseInt(h.split(':')[0], 10) > nowH);
+        return idx === -1 ? ALL : idx - 1;
+      }
+      // After midnight (0–6): shift still running
+      // Night hours after midnight start at index 5 ([19,20,21,22,23,0,1,2,3,4,5,6])
+      const midnightStart = hourly.hours.findIndex((h) => h === '00:00');
+      if (midnightStart === -1) return ALL;
+      const idx = hourly.hours.findIndex((h, i) => {
+        if (i < midnightStart) return false;
+        return parseInt(h.split(':')[0], 10) > nowH;
+      });
+      return idx === -1 ? ALL : idx - 1;
+    }
+  });
+
+  const chartTitle = $derived(
+    shift === 'D'
+      ? 'Cumulative Output vs Target — Day shift 07:00–19:00'
+      : 'Cumulative Output vs Target — Night shift 19:00–07:00'
+  );
+
+  // ── Fetch all data ─────────────────────────────────────────────────────────
+  async function fetchAll() {
+    loading = true;
+    noDataMsg = null;
+    try {
+      const [sRes, hRes, wRes, msRes] = await Promise.all([
+        fetch(`${base}/api/plating`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ DateStart: date, DateEnd: date, Process: process, Site: site, shift }),
+        }),
+        fetch(`${base}/api/plating/hourly?date=${date}&shift=${shift}&process=${encodeURIComponent(process)}&site=${encodeURIComponent(site)}`),
+        fetch(`${base}/api/wip-history?date=${date}&shift=${shift}`),
+        fetch(`${base}/api/plating/machine-status?date=${date}&shift=${shift}`),
+      ]);
+
+      if (!sRes.ok) throw new Error(`summary HTTP ${sRes.status}`);
+      if (!hRes.ok) throw new Error(`hourly HTTP ${hRes.status}`);
+
+      const s = (await sRes.json()) as PlatingDailySummary;
+      const h = (await hRes.json()) as PlatingHourlyResponse;
+      wipHistory = wRes.ok ? (await wRes.json()) as WipHistoryResponse : null;
+      machineStatus = msRes.ok ? (await msRes.json()) as MachineStatusResponse : null;
+
+      // Auto-fallback: if selected date has no data, try the previous day automatically
+      if (s.recordsTotal === 0) {
+        const prevDate = subtractOneDay(date);
+        const [s2Res] = await Promise.all([
+          fetch(`${base}/api/plating`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ DateStart: prevDate, DateEnd: prevDate, Process: process, Site: site, shift }),
+          }),
+        ]);
+        if (s2Res.ok) {
+          const s2 = (await s2Res.json()) as PlatingDailySummary;
+          if (s2.recordsTotal > 0) {
+            const h2Res = await fetch(`${base}/api/plating/hourly?date=${prevDate}&shift=${shift}&process=${encodeURIComponent(process)}&site=${encodeURIComponent(site)}`);
+            const h2 = h2Res.ok ? (await h2Res.json()) as PlatingHourlyResponse : h;
+            summary = s2;
+            hourly = h2;
+            // Keep `date` at user-selected date so cutoff stays correct for today's timeline
+            noDataMsg = `ข้อมูล ${date} ยังไม่พร้อม (commit หลัง shift จบ 19:00) — แสดงข้อมูล ${prevDate}`;
+            lastUpdated = `Updated ${new Date().toLocaleTimeString()} · Auto-refresh 5 min`;
+            return;
+          }
+        }
+        // No fallback data either
+        noDataMsg = `ไม่มีข้อมูลสำหรับ ${date} — ข้อมูลจะแสดงหลัง shift จบ`;
+        summary = s;
+        hourly = h;
+      } else {
+        summary = s;
+        hourly = h;
+      }
+
+      lastUpdated = `Updated ${new Date().toLocaleTimeString()} · Auto-refresh 5 min`;
+    } catch (e) {
+      lastUpdated = 'Error — retrying in 5 min';
+      console.error(e);
+    } finally {
+      loading = false;
+    }
+  }
+
+  // ── Hour drill-down — build package rows from hourly snapshot ─────────────
+  function selectHour(hour: number) {
+    selectedHour = hour;
+    selectedPkg = null;
+    selectedMachine = null;
+    if (!hourly) { packageRows = []; machineRows = []; return; }
+
+    const idx = hourly.hours.findIndex((h) => parseInt(h.split(':')[0], 10) === hour);
+    if (idx === -1) { packageRows = []; return; }
+
+    const totalHours = hourly.hours.length;
+    // Pro-rate plan to hours elapsed: plan × (idx+1) / totalHours
+    const elapsed = idx + 1;
+
+    // Use pkgOrder (A01 full list) — output is looked up via normToOut mapping
+    packageRows = (hourly!.pkgOrder.length > 0 ? hourly!.pkgOrder : Object.keys(hourly!.packages).map(p => {
+      const nk = p; // fallback: use outputbymc key directly
+      return nk;
+    })).map((nk) => {
+      const displayName = hourly!.pkgNames[nk] ?? nk;
+      const outKey = hourly!.normToOut[nk];                          // outputbymc pkg key
+      const output = outKey ? (hourly!.packages[outKey]?.[idx] ?? 0) : 0;
+      const planPerShift = hourly!.pkgPlans[nk] ?? 0;
+      const target = planPerShift > 0 ? Math.round(planPerShift * elapsed / totalHours) : 0;
+      const pct = target > 0 ? ((output - target) / target) * 100 : 0;
+      const mold   = hourly!.pkgMold[nk]   ?? null;
+      const mark   = hourly!.pkgMark[nk]   ?? null;
+      const reflow = hourly!.pkgReflow[nk] ?? null;
+      const wip    = hourly!.pkgWip[nk]    ?? null;
+      const doi    = hourly!.pkgDoi[nk]    ?? null;
+      return { package: displayName, output, target, pct, planPerShift, mold, mark, reflow, wip, doi };
+    });
+
+    // Build machine rows using cumulative output at the selected hour index
+    const entries = Object.entries(hourly.machineHourly)
+      .map(([machineId, cumArr]) => ({ machineId, output: cumArr[idx] ?? 0 }))
+      .filter((r) => r.output > 0)
+      .sort((a, b) => b.output - a.output);
+
+    // Target: full shift target split per machine — matches KPI card
+    const numMachines = entries.length || 1;
+    const targetPerMachine = summary && summary.targetShift > 0
+      ? Math.round(summary.targetShift / numMachines)
+      : 0;
+
+    machineRows = entries.map((r) => {
+      const stat = machineStatus?.byEpNum[epNum(r.machineId)];
+      const hasOutput = r.output > 0;
+      return {
+        machineId:  r.machineId,
+        output:     r.output,
+        target:     targetPerMachine,
+        vsPct:      targetPerMachine > 0 ? ((r.output - targetPerMachine) / targetPerMachine) * 100 : 0,
+        lastScan:   null,
+        status:          stat?.status ?? (hasOutput ? 'RUN' : 'IDLE'),
+        downEvents:      stat?.downEvents      ?? 0,
+        avgMttrMin:      stat?.avgMttrMin      ?? 0,
+        availabilityPct: stat?.availabilityPct ?? null,
+        events:          stat?.events ?? [],
+      };
+    });
+  }
+
+  // ── Package drill-down — use machineOutput from hourly (avoids package name mismatch) ──
+  function selectPkg(pkg: string) {
+    selectedPkg = pkg;
+    selectedMachine = null;
+    if (!hourly) { machineRows = []; return; }
+
+    // Find outputbymc key for this package (pkg may be display name or normKey)
+    // Try normToOut reverse lookup: find normKey whose pkgNames[nk] === pkg
+    const nk = Object.entries(hourly.pkgNames).find(([, name]) => name === pkg)?.[0] ?? pkg;
+    const outKey = hourly.normToOut[nk] ?? pkg;
+
+    // Build rows from machineOutput: machineId → output for this package
+    const entries = Object.entries(hourly.machineOutput)
+      .map(([machineId, pkgs]) => ({ machineId, output: pkgs[outKey] ?? 0 }))
+      .filter((r) => r.output > 0)
+      .sort((a, b) => b.output - a.output);
+
+    if (entries.length === 0) { machineRows = []; return; }
+
+    const numMachinesPkg = entries.length || 1;
+    // Use pkg's per-shift plan divided by machines; fall back to average output
+    const pkgPlan = hourly.pkgPlans[
+      Object.entries(hourly.pkgNames).find(([, name]) => name === pkg)?.[0] ?? ''
+    ] ?? 0;
+    const target = pkgPlan > 0
+      ? Math.round(pkgPlan / numMachinesPkg)
+      : Math.round(entries.reduce((s, r) => s + r.output, 0) / numMachinesPkg);
+
+    machineRows = entries.map((r) => {
+      const stat = machineStatus?.byEpNum[epNum(r.machineId)];
+      const vsPct = target > 0 ? ((r.output - target) / target) * 100 : 0;
+      return { machineId: r.machineId, output: r.output, target, vsPct, lastScan: null,
+               status: stat?.status ?? (r.output > 0 ? 'RUN' : 'IDLE'),
+               downEvents: stat?.downEvents ?? 0, avgMttrMin: stat?.avgMttrMin ?? 0,
+               availabilityPct: stat?.availabilityPct ?? null,
+               events: stat?.events ?? [] };
+    });
+  }
+
+  function selectMachine(machineId: string) {
+    selectedMachine = machineId;
+  }
+
+  function onFiltersChanged() {
+    selectedHour = null;
+    selectedPkg = null;
+    selectedMachine = null;
+    packageRows = null;
+    machineRows = null;
+    fetchAll();
+  }
+
+  onMount(() => {
+    fetchAll();
+    const id = setInterval(fetchAll, REFRESH_MS);
+    return () => clearInterval(id);
+  });
+
+  function subtractOneDay(dateStr: string): string {
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const prev = new Date(y, m - 1, d - 1);
+    return fmt(prev);
+  }
+
+  function todayStr(): string {
+    const d = new Date();
+    return fmt(d);
+  }
+
+  function yesterdayStr(): string {
+    const d = new Date();
+    d.setDate(d.getDate() - 1);
+    return fmt(d);
+  }
+
+  function fmt(d: Date): string {
+    return [
+      d.getFullYear(),
+      String(d.getMonth() + 1).padStart(2, '0'),
+      String(d.getDate()).padStart(2, '0'),
+    ].join('-');
+  }
 </script>
 
 <svelte:head>
-  <title>SvelteKit 5 + Rust Axum — Demo</title>
+  <title>Plating Output Monitor</title>
 </svelte:head>
 
-<main>
-  <!-- Hero -->
-  <section class="hero">
-    <div class="hero-inner">
-      <h1>SvelteKit 5 + Rust Axum</h1>
-      <p class="tagline">
-        Production-ready full-stack template — Svelte 5 Runes on the front,
-        a typed Axum API on the back, deployed to IIS on Windows Server.
-      </p>
-      <div class="cta-row">
-        <a href="#tech-stack" class="btn btn-outline-dark">Get Started</a>
-        <a href="#features" class="btn btn-ghost-dark">Learn More</a>
-      </div>
-    </div>
-  </section>
+<DashboardHeader
+  {date}
+  {shift}
+  {process}
+  {site}
+  {loading}
+  {lastUpdated}
+  onDateChange={(v) => { date = v; onFiltersChanged(); }}
+  onShiftChange={(s) => { shift = s; onFiltersChanged(); }}
+  onProcessChange={(v) => { process = v; }}
+  onSiteChange={(v) => { site = v; }}
+  onRefresh={onFiltersChanged}
+/>
 
-  <!-- Tech Stack -->
-  <section id="tech-stack" class="section section-white">
-    <div class="section-inner">
-      <h2>Tech Stack</h2>
-      <p class="section-lead">Each layer chosen for type-safety, performance, and Windows-native deployment.</p>
-      <div class="tech-grid">
-        {#each techStack as tech (tech.layer)}
-          <article class="card tech-card" data-accent={tech.accent}>
-            <span class="card-accent"></span>
-            <span class="card-eyebrow">{tech.layer}</span>
-            <h3>{tech.name}</h3>
-            <p class="card-meta">{tech.version}</p>
-          </article>
-        {/each}
-      </div>
-    </div>
-  </section>
+<KpiCards {kpis} />
 
-  <!-- Features -->
-  <section id="features" class="section section-alt">
-    <div class="section-inner">
-      <h2>Features</h2>
-      <p class="section-lead">Conventions enforced by CLAUDE.md — no SELECT *, no unwrap, no hardcoded secrets.</p>
-      <div class="feature-grid">
-        {#each features as feature (feature.title)}
-          <article class="card feature-card">
-            <h3>{feature.title}</h3>
-            <p>{feature.body}</p>
-          </article>
-        {/each}
-      </div>
-    </div>
-  </section>
-</main>
+
+<MainChart
+  {hourly}
+  title={chartTitle}
+  cutoffIndex={cutoffIndex()}
+  onSelectHour={selectHour}
+  {wipHistory}
+/>
+
+<section class="drill-row">
+  <PackagePanel
+    rows={packageRows}
+    hour={selectedHour}
+    {selectedPkg}
+    onSelect={selectPkg}
+  />
+  <MachineTable
+    rows={machineRows}
+    pkg={selectedPkg}
+    hour={selectedHour}
+    {selectedMachine}
+    onSelect={selectMachine}
+  />
+</section>
+
+<div class="page-end"></div>
 
 <style>
-  /* Design tokens — sourced from DESIGN.md (Microchip Industrial Light) */
-  main {
-    --color-primary: #1c355e;
-    --color-primary-hover: #157eac;
-    --color-accent-blue: #41b6e6;
-    --color-accent-orange: #f68d2e;
-    --color-accent-green: #6cc24a;
-    --color-brand-red: #da291c;
-    --color-text-heading: #34333e;
-    --color-text-body: rgba(0, 0, 0, 0.8);
-    --color-text-muted: #838e93;
-    --color-text-disabled: #b6b7b9;
-    --color-surface: #ffffff;
-    --color-surface-alt: #f8f8f7;
-    --color-surface-gray: #f1f2f2;
-    --color-border-strong: #b6b7b9;
-
-    --radius-sm: 4px;
-    --content-max: 1440px;
-    --section-v: 75px;
-    --card-pad: 16px;
-
-    --font: 'Open Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-
-    font-family: var(--font);
-    color: var(--color-text-body);
-    font-size: 15px;
-    line-height: 24px;
-    margin: 0;
-    display: block;
-  }
-
-  h1,
-  h2,
-  h3 {
-    margin: 0;
-    color: var(--color-text-heading);
-  }
-
-  h1 {
-    font-size: 35px;
-    font-weight: 700;
-    line-height: 40px;
-  }
-  h2 {
-    font-size: 23px;
-    font-weight: 600;
-    line-height: 27px;
-  }
-  h3 {
-    font-size: 17px;
-    font-weight: 600;
-    line-height: 24px;
-  }
-
-  /* ── Hero ─────────────────────────────────────────────── */
-  .hero {
-    background-color: var(--color-primary);
-    background-image: linear-gradient(
-      270deg,
-      rgba(28, 53, 94, 0) 0,
-      rgba(28, 53, 94, 0.5) 50%,
-      var(--color-primary) 100%
-    );
-    color: #ffffff;
-    padding: 45px 6%;
-  }
-
-  .hero-inner {
+  .drill-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+    padding: 16px 24px 0;
     max-width: var(--content-max);
     margin: 0 auto;
-    padding: 60px 0;
+    width: 100%;
   }
+  .page-end { height: 32px; }
 
-  .hero h1 {
-    color: #ffffff;
-    font-size: 36px;
-    font-weight: 600;
-    line-height: 44px;
-    margin-bottom: 16px;
-    max-width: 760px;
-  }
-
-  .tagline {
-    color: var(--color-text-disabled);
-    font-size: 15px;
-    line-height: 24px;
-    max-width: 640px;
-    margin: 0 0 32px 0;
-  }
-
-  .cta-row {
-    display: flex;
-    gap: 16px;
-    flex-wrap: wrap;
-  }
-
-  /* ── Sections ─────────────────────────────────────────── */
-  .section {
-    padding: var(--section-v) 6%;
-  }
-  .section-white {
-    background-color: var(--color-surface);
-  }
-  .section-alt {
-    background-color: var(--color-surface-gray);
-  }
-  .section-inner {
-    max-width: var(--content-max);
-    margin: 0 auto;
-  }
-  .section h2 {
-    margin-bottom: 8px;
-  }
-  .section-lead {
-    color: var(--color-text-muted);
-    margin: 0 0 32px 0;
-    max-width: 640px;
-  }
-
-  /* ── Cards ────────────────────────────────────────────── */
-  .card {
-    background-color: var(--color-surface-alt);
-    border: 1px solid var(--color-border-strong);
-    border-radius: var(--radius-sm);
-    padding: var(--card-pad);
-  }
-
-  .tech-grid {
-    display: grid;
-    gap: 16px;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  }
-
-  .tech-card {
-    position: relative;
-    padding-top: 24px;
-    overflow: hidden;
-  }
-
-  .card-accent {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: 4px;
-    background: var(--accent-color);
-  }
-
-  .tech-card[data-accent='orange'] {
-    --accent-color: var(--color-accent-orange);
-  }
-  .tech-card[data-accent='blue'] {
-    --accent-color: var(--color-accent-blue);
-  }
-  .tech-card[data-accent='green'] {
-    --accent-color: var(--color-accent-green);
-  }
-  .tech-card[data-accent='red'] {
-    --accent-color: var(--color-brand-red);
-  }
-
-  .card-eyebrow {
-    display: block;
-    font-size: 12px;
-    font-weight: 600;
-    line-height: 17px;
-    color: #586674;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    margin-bottom: 8px;
-  }
-
-  .tech-card h3 {
-    margin-bottom: 4px;
-  }
-
-  .card-meta {
-    margin: 0;
-    color: var(--color-text-muted);
-    font-size: 14px;
-    line-height: 20px;
-    letter-spacing: 0.25px;
-  }
-
-  .feature-grid {
-    display: grid;
-    gap: 16px;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-  }
-
-  .feature-card h3 {
-    margin-bottom: 8px;
-  }
-
-  .feature-card p {
-    margin: 0;
-    color: var(--color-text-body);
-  }
-
-  /* ── Buttons ──────────────────────────────────────────── */
-  .btn {
-    display: inline-block;
-    border-radius: var(--radius-sm);
-    font-weight: 600;
-    font-size: 16px;
-    line-height: 24px;
-    padding: 10px 24px;
-    text-decoration: none;
-    cursor: pointer;
-    transition:
-      color 0.15s ease,
-      border-color 0.15s ease,
-      background-color 0.15s ease;
-  }
-
-  .btn-outline-dark {
-    background-color: transparent;
-    color: #ffffff;
-    border: 1px solid #ffffff;
-  }
-  .btn-outline-dark:hover {
-    color: var(--color-primary-hover);
-    border-color: var(--color-primary-hover);
-  }
-
-  .btn-ghost-dark {
-    background-color: transparent;
-    color: #ffffff;
-    border: 1px solid transparent;
-  }
-  .btn-ghost-dark:hover {
-    color: var(--color-accent-blue);
-    text-decoration: underline;
-  }
-
-  /* ── Responsive ───────────────────────────────────────── */
-  @media (max-width: 768px) {
-    .hero-inner {
-      padding: 24px 0;
-    }
-    .hero h1 {
-      font-size: 28px;
-      line-height: 36px;
-    }
-    .section {
-      padding: 48px 6%;
-    }
+  @media (max-width: 1024px) {
+    .drill-row { grid-template-columns: 1fr; }
   }
 </style>
