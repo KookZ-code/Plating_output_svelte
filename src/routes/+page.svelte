@@ -111,9 +111,22 @@
       // Night shift 19:00-07:00 spanning midnight
       if (nowH >= 7 && nowH < 19) return ALL;   // day time → night shift ended
       if (nowH >= 19) {
-        // Evening: shift in progress, find position in 19–23 range
-        const idx = hourly.hours.findIndex((h) => parseInt(h.split(':')[0], 10) > nowH);
-        return idx === -1 ? ALL : idx - 1;
+        // Evening: shift in progress, find next pre-midnight hour > nowH
+        // Cannot use simple findIndex(h > nowH) because "00:00" parses as 0 which is < 23,
+        // causing idx=-1 → ALL (shows midnight bars that haven't happened yet).
+        const idx = hourly.hours.findIndex((h) => {
+          const hi = parseInt(h.split(':')[0], 10);
+          return hi > nowH && hi >= 19;  // only pre-midnight hours
+        });
+        if (idx === -1) {
+          // nowH=23 or similar: find index of the last pre-midnight hour (23:00)
+          let last = 0;
+          for (let i = 0; i < hourly.hours.length; i++) {
+            if (parseInt(hourly.hours[i].split(':')[0], 10) >= 19) last = i;
+          }
+          return last;
+        }
+        return idx - 1;
       }
       // After midnight (0–6): shift still running
       // Night hours after midnight start at index 5 ([19,20,21,22,23,0,1,2,3,4,5,6])
@@ -146,7 +159,7 @@
         }),
         fetch(`${base}/api/plating/hourly?date=${date}&shift=${shift}&process=${encodeURIComponent(process)}&site=${encodeURIComponent(site)}`),
         fetch(`${base}/api/wip-history?date=${date}&shift=${shift}`),
-        fetch(`${base}/api/plating/machine-status?date=${date}&shift=${shift}`),
+        fetch(`${base}/api/plating/machine-status?date=${date}&shift=${shift}&process=${encodeURIComponent(process)}`),
       ]);
 
       if (!sRes.ok) throw new Error(`summary HTTP ${sRes.status}`);
@@ -223,11 +236,29 @@
       const planPerShift = hourly!.pkgPlans[nk] ?? 0;
       const target = planPerShift > 0 ? Math.round(planPerShift * elapsed / totalHours) : 0;
       const pct = target > 0 ? ((output - target) / target) * 100 : 0;
-      const mold   = hourly!.pkgMold[nk]   ?? null;
-      const mark   = hourly!.pkgMark[nk]   ?? null;
-      const reflow = hourly!.pkgReflow[nk] ?? null;
-      const wip    = hourly!.pkgWip[nk]    ?? null;
-      const doi    = hourly!.pkgDoi[nk]    ?? null;
+      // Map WIP fields based on selected process
+      let mold: number | null, mark: number | null, reflow: number | null,
+          wip: number | null, doi: number | null;
+      if (process === 'Mold') {
+        mold   = hourly!.pkgStaging[nk]  ?? null;  // Staging WIP (before Mold)
+        mark   = null;
+        reflow = null;
+        wip    = hourly!.pkgMoldWip[nk]  ?? null;  // Mold WIP (target)
+        doi    = hourly!.pkgMoldDoi[nk]  ?? null;
+      } else if (process === 'Mark') {
+        mold   = hourly!.pkgMoldWip[nk]  ?? null;  // Mold WIP (before Mark)
+        mark   = hourly!.pkgMark[nk]     ?? null;  // Mark WIP (target)
+        reflow = null;
+        wip    = null;
+        doi    = hourly!.pkgMarkDoi[nk]  ?? null;
+      } else {
+        // Plate (default)
+        mold   = hourly!.pkgMold[nk]   ?? null;
+        mark   = hourly!.pkgMark[nk]   ?? null;
+        reflow = hourly!.pkgReflow[nk] ?? null;
+        wip    = hourly!.pkgWip[nk]    ?? null;
+        doi    = hourly!.pkgDoi[nk]    ?? null;
+      }
       return { package: displayName, output, target, pct, planPerShift, mold, mark, reflow, wip, doi };
     });
 
@@ -346,7 +377,7 @@
 </script>
 
 <svelte:head>
-  <title>Plating Output Monitor</title>
+  <title>EOL Output Monitor</title>
 </svelte:head>
 
 <DashboardHeader
@@ -358,7 +389,7 @@
   {lastUpdated}
   onDateChange={(v) => { date = v; onFiltersChanged(); }}
   onShiftChange={(s) => { shift = s; onFiltersChanged(); }}
-  onProcessChange={(v) => { process = v; }}
+  onProcessChange={(v) => { process = v; onFiltersChanged(); }}
   onSiteChange={(v) => { site = v; }}
   onRefresh={onFiltersChanged}
 />
@@ -379,6 +410,7 @@
     rows={packageRows}
     hour={selectedHour}
     {selectedPkg}
+    {process}
     onSelect={selectPkg}
   />
   <MachineTable

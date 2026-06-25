@@ -9,20 +9,28 @@ interface A01Row {
   Item: number;
   Package: string;
   Plan: number;
-  Mold: number;       // Post Mold WIP
+  Staging: number;    // Staging WIP (before Mold)
+  Mold: number;       // Mold WIP
+  MoldDOI: number;    // Mold DOI
+  PMC: number;        // Post Mold Cure WIP
   Mark: number;       // Mark WIP
+  MarkDOI: number;    // Mark DOI
   Reflow: number;     // Reflow WIP
   Plate: number;      // Plating-stage WIP
   PlateDOI: number;   // Plating-stage DOI
 }
 
 export interface A01Val {
-  plan: number;    // per DAY — caller divides by 2 for per-shift
-  mold: number;    // Post Mold WIP
-  mark: number;    // Mark WIP
-  reflow: number;  // Reflow WIP
-  wip: number;     // Plating-stage WIP
-  doi: number;     // Plating-stage DOI
+  plan: number;      // per DAY — caller divides by 2 for per-shift
+  staging: number;   // Staging WIP (r.Staging)
+  moldWip: number;   // Mold WIP (r.Mold) — target for Mold process, upstream for Mark
+  moldDoi: number;   // Mold DOI (r.MoldDOI)
+  mold: number;      // PMC WIP (r.PMC) — "Post Mold" column for Plate process
+  mark: number;      // Mark WIP (r.Mark)
+  markDoi: number;   // Mark DOI (r.MarkDOI)
+  reflow: number;    // Reflow WIP
+  wip: number;       // Plate WIP (r.Plate)
+  doi: number;       // Plate DOI (r.PlateDOI)
 }
 
 export interface A01Data {
@@ -97,11 +105,15 @@ export async function fetchA01(): Promise<A01Data> {
   for (const r of rawRows) {
     if (!r.Package || r.Package === 'TOTAL' || r.Package === 'ALL QFN') continue;
     const plan   = r.Plan   ?? 0;
-    const mold   = r.PMC    ?? 0;  // Post Mold Cure WIP (was r.Mold)
-    const mark   = r.Mark   ?? 0;
-    const reflow = r.Reflow ?? 0;
-    const wip    = r.Plate  ?? 0;
-    const doi    = r.PlateDOI ?? 0;
+    const staging = r.Staging  ?? 0;
+    const moldWip = r.Mold     ?? 0;
+    const moldDoi = r.MoldDOI  ?? 0;
+    const mold    = r.PMC      ?? 0;  // Post Mold Cure WIP
+    const mark    = r.Mark     ?? 0;
+    const markDoi = r.MarkDOI  ?? 0;
+    const reflow  = r.Reflow   ?? 0;
+    const wip     = r.Plate    ?? 0;
+    const doi     = r.PlateDOI ?? 0;
     totalDailyPlan += plan;
     orderedRows.push({ pkg: normPkg(r.Package), plan });
 
@@ -109,12 +121,16 @@ export async function fetchA01(): Promise<A01Data> {
     if (nk) {
       const cur = byNorm.get(nk);
       byNorm.set(nk, {
-        plan:   (cur?.plan   ?? 0) + plan,
-        mold:   (cur?.mold   ?? 0) + mold,
-        mark:   (cur?.mark   ?? 0) + mark,
-        reflow: (cur?.reflow ?? 0) + reflow,
-        wip:    (cur?.wip    ?? 0) + wip,
-        doi:    cur ? cur.doi : doi,
+        plan:    (cur?.plan    ?? 0) + plan,
+        staging: (cur?.staging ?? 0) + staging,
+        moldWip: (cur?.moldWip ?? 0) + moldWip,
+        moldDoi: cur ? cur.moldDoi : moldDoi,
+        mold:    (cur?.mold    ?? 0) + mold,
+        mark:    (cur?.mark    ?? 0) + mark,
+        markDoi: cur ? cur.markDoi : markDoi,
+        reflow:  (cur?.reflow  ?? 0) + reflow,
+        wip:     (cur?.wip     ?? 0) + wip,
+        doi:     cur ? cur.doi : doi,
       });
     }
   }

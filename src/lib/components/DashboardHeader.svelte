@@ -32,8 +32,8 @@
 
 <header class="header">
   <div class="header-left">
-    <h1>Plating Output Monitor</h1>
-    <div class="subtitle">Assembly : MTH Plant</div>
+    <h1>EOL Output Monitor</h1>
+    <div class="subtitle">Assembly : MTAI Plant</div>
   </div>
 
   <div class="header-right">
@@ -71,12 +71,16 @@
 
     <div class="filter-group">
       <span class="filter-label">Process</span>
-      <input
-        type="text"
-        class="filter-input narrow"
-        value={process}
-        onchange={(e) => onProcessChange((e.target as HTMLInputElement).value)}
-      />
+      <div class="shift-toggle">
+        {#each ['Plate', 'Mold', 'Mark'] as p}
+          <button
+            type="button"
+            class="shift-btn"
+            class:active={process === p}
+            onclick={() => onProcessChange(p)}>{p}</button
+          >
+        {/each}
+      </div>
     </div>
 
     <div class="filter-group">

@@ -4,7 +4,7 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import {
   getLotApiUrl,
-  getMachineListUrl,
+  getMachineListUrlForProcess,
   getApiTimeout,
   getDefaultProcess,
   DAY_SHIFT_START,
@@ -26,17 +26,24 @@ export const GET: RequestHandler = async ({ url }) => {
 
   const timeout = getApiTimeout();
 
-  // ── Step 1: get EP machines only (MTAI_EP*) ───────────────────────────
+  // ── Step 1: get machines for the selected process ────────────────────
+  const activeProcess = process || getDefaultProcess();
+  const machineFilter: Record<string, RegExp> = {
+    Plate: /MTAI_EP\d+/i,
+    Mold:  /MTAI_MO\d+/i,
+    Mark:  /MTAI_LM\d+/i,
+  };
+  const filter = machineFilter[activeProcess] ?? null;
+
   let machineIds: string[] = [];
   try {
     const ctrl = new AbortController();
     const t = setTimeout(() => ctrl.abort(), timeout);
-    const res = await fetch(getMachineListUrl(), { signal: ctrl.signal });
+    const res = await fetch(getMachineListUrlForProcess(activeProcess), { signal: ctrl.signal });
     clearTimeout(t);
     if (res.ok) {
       const all = (await res.json()) as string[];
-      // Filter to EP machines only (same scope as OutputByMachine API)
-      machineIds = all.filter((id) => /MTAI_EP\d+/i.test(id));
+      machineIds = filter ? all.filter((id) => filter.test(id)) : all;
     }
   } catch {
     return json(emptyHourly(shift));
@@ -138,12 +145,16 @@ export const GET: RequestHandler = async ({ url }) => {
 
   // ── Step 4: A01 — target line + per-package plan / WIP / DOI ─────────
   let targetPerShift = 0;
-  const pkgPlans:  Record<string, number> = {};
-  const pkgMold:   Record<string, number> = {};
-  const pkgMark:   Record<string, number> = {};
-  const pkgReflow: Record<string, number> = {};
-  const pkgWip:    Record<string, number> = {};
-  const pkgDoi:    Record<string, number> = {};
+  const pkgPlans:   Record<string, number> = {};
+  const pkgStaging: Record<string, number> = {};
+  const pkgMoldWip: Record<string, number> = {};
+  const pkgMoldDoi: Record<string, number> = {};
+  const pkgMold:    Record<string, number> = {};
+  const pkgMark:    Record<string, number> = {};
+  const pkgMarkDoi: Record<string, number> = {};
+  const pkgReflow:  Record<string, number> = {};
+  const pkgWip:     Record<string, number> = {};
+  const pkgDoi:     Record<string, number> = {};
   const pkgOrder:  string[] = [];                // all A01 normKeys in sequence
   const pkgNames:  Record<string, string> = {};  // normKey → A01 display name
   const normToOut: Record<string, string> = {};  // normKey → outputbymc pkg key
@@ -166,12 +177,16 @@ export const GET: RequestHandler = async ({ url }) => {
 
       const val = a01.byNorm.get(nk);
       if (val) {
-        pkgPlans[nk]  = Math.round(val.plan / 2);
-        if (val.mold   > 0) pkgMold[nk]   = val.mold;
-        if (val.mark   > 0) pkgMark[nk]   = val.mark;
-        if (val.reflow > 0) pkgReflow[nk] = val.reflow;
-        if (val.wip    > 0) pkgWip[nk]    = val.wip;
-        if (val.doi    > 0) pkgDoi[nk]    = val.doi;
+        pkgPlans[nk]   = Math.round(val.plan / 2);
+        if (val.staging > 0) pkgStaging[nk] = val.staging;
+        if (val.moldWip > 0) pkgMoldWip[nk] = val.moldWip;
+        if (val.moldDoi > 0) pkgMoldDoi[nk] = val.moldDoi;
+        if (val.mold    > 0) pkgMold[nk]    = val.mold;
+        if (val.mark    > 0) pkgMark[nk]    = val.mark;
+        if (val.markDoi > 0) pkgMarkDoi[nk] = val.markDoi;
+        if (val.reflow  > 0) pkgReflow[nk]  = val.reflow;
+        if (val.wip     > 0) pkgWip[nk]     = val.wip;
+        if (val.doi     > 0) pkgDoi[nk]     = val.doi;
       }
       // Map normKey to outputbymc package name for output lookup
       const outPkg = outByNorm.get(nk);
@@ -209,7 +224,7 @@ export const GET: RequestHandler = async ({ url }) => {
       ? hours.map((_, i) => Math.round((targetPerShift / hours.length) * (i + 1)))
       : hours.map(() => 0);
 
-  return json({ hours, packages, target_cumulative, machineOutput, machineHourly, pkgPlans, pkgMold, pkgMark, pkgReflow, pkgWip, pkgDoi, pkgOrder, pkgNames, normToOut } satisfies PlatingHourlyResponse);
+  return json({ hours, packages, target_cumulative, machineOutput, machineHourly, pkgPlans, pkgStaging, pkgMoldWip, pkgMoldDoi, pkgMold, pkgMark, pkgMarkDoi, pkgReflow, pkgWip, pkgDoi, pkgOrder, pkgNames, normToOut } satisfies PlatingHourlyResponse);
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -297,5 +312,5 @@ function addOneDay(dateStr: string): string {
 
 function emptyHourly(shift: Shift): PlatingHourlyResponse {
   const hours = buildHourLabels(shift);
-  return { hours, packages: {}, target_cumulative: hours.map(() => 0), machineOutput: {}, machineHourly: {}, pkgPlans: {}, pkgMold: {}, pkgMark: {}, pkgReflow: {}, pkgWip: {}, pkgDoi: {}, pkgOrder: [], pkgNames: {}, normToOut: {} };
+  return { hours, packages: {}, target_cumulative: hours.map(() => 0), machineOutput: {}, machineHourly: {}, pkgPlans: {}, pkgStaging: {}, pkgMoldWip: {}, pkgMoldDoi: {}, pkgMold: {}, pkgMark: {}, pkgMarkDoi: {}, pkgReflow: {}, pkgWip: {}, pkgDoi: {}, pkgOrder: [], pkgNames: {}, normToOut: {} };
 }

@@ -32,25 +32,33 @@ interface EmhMachineDetail {
   };
 }
 
+const PROCESS_AREA: Record<string, string> = {
+  Plate: 'PLATE',
+  Mold:  'MOLD',
+  Mark:  'MARK',
+};
+
 export const GET: RequestHandler = async ({ url }) => {
-  const date  = url.searchParams.get('date')  ?? todayStr();
+  const date    = url.searchParams.get('date')    ?? todayStr();
   const shift: Shift = url.searchParams.get('shift') === 'N' ? 'N' : 'D';
+  const process = url.searchParams.get('process') ?? 'Plate';
+  const area    = PROCESS_AREA[process] ?? 'PLATE';
 
   const base    = getEmhApiUrl();
   const headers = { 'X-API-Key': getEmhApiKey() };
   const timeout = 10_000;
   const qs = `date=${date}&shift=${shift}`;
 
-  // ── Step 1: fetch all Plate events to discover machine IDs ───────────────
+  // ── Step 1: fetch events for the selected process area ───────────────────
   let allEvents: EmhEvent[] = [];
   try {
     const res = await fetchJson<{ status: string; data: { events: EmhEvent[] } }>(
-      `${base}/api/v1/downtime/events?area=PLATE&${qs}&limit=9999`,
+      `${base}/api/v1/downtime/events?area=${encodeURIComponent(area)}&${qs}&limit=9999`,
       headers,
       timeout
     );
     allEvents = (res?.data?.events ?? [])
-      .filter((e) => e.area?.toUpperCase() === 'PLATE')
+      .filter((e) => e.area?.toUpperCase() === area)
       .filter((e) => inShift(e.event_time, date, shift));
   } catch {
     // events unavailable — return empty

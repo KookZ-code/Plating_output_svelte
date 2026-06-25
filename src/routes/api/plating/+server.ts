@@ -35,8 +35,10 @@ export const POST: RequestHandler = async ({ request }) => {
   const process = body.Process || getDefaultProcess();
   const site    = body.Site    || getDefaultSite();
 
-  const dateStart = shift === 'N' ? subtractOneDay(body.DateStart!) : body.DateStart!;
-  const dateEnd   = shift === 'N' ? body.DateStart!                  : addOneDay(body.DateStart!);
+  // preformanceV2 requires DateStart=day-1, DateEnd=day to return data for a given day.
+  // Both Day and Night shift use the same range: (date-1) → date.
+  const dateStart = subtractOneDay(body.DateStart!);
+  const dateEnd   = body.DateStart!;
 
   const timeout = getApiTimeout();
 

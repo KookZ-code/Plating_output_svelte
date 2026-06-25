@@ -72,11 +72,15 @@ export interface PlatingHourlyResponse {
   machineOutput: Record<string, Record<string, number>>;  // machineId → pkg → total shift output
   machineHourly: Record<string, number[]>;                // machineId → cumulative output per hour (same index as hours[])
   pkgPlans:  Record<string, number>;  // normKey → per-shift plan
-  pkgMold:   Record<string, number>;  // normKey → Post Mold WIP
-  pkgMark:   Record<string, number>;  // normKey → Mark WIP
-  pkgReflow: Record<string, number>;  // normKey → Reflow WIP
-  pkgWip:    Record<string, number>;  // normKey → Plating WIP
-  pkgDoi:    Record<string, number>;  // normKey → Plating DOI
+  pkgStaging:  Record<string, number>;  // normKey → Staging WIP
+  pkgMoldWip:  Record<string, number>;  // normKey → Mold WIP
+  pkgMoldDoi:  Record<string, number>;  // normKey → Mold DOI
+  pkgMold:     Record<string, number>;  // normKey → PMC (Post Mold Cure) WIP
+  pkgMark:     Record<string, number>;  // normKey → Mark WIP
+  pkgMarkDoi:  Record<string, number>;  // normKey → Mark DOI
+  pkgReflow:   Record<string, number>;  // normKey → Reflow WIP
+  pkgWip:      Record<string, number>;  // normKey → Plate WIP
+  pkgDoi:      Record<string, number>;  // normKey → Plate DOI
   pkgOrder:  string[];                // A01 ordered normKeys (all with plan>0)
   pkgNames:  Record<string, string>;  // normKey → display name from A01
   normToOut: Record<string, string>;  // normKey → outputbymc pkg key (for output lookup)
@@ -101,11 +105,15 @@ export interface PlatingPackageRow {
   target: number;
   pct: number;
   planPerShift: number;
-  mold:   number | null;  // Post Mold WIP
-  mark:   number | null;  // Mark WIP
-  reflow: number | null;  // Reflow WIP
-  wip:    number | null;  // Plating WIP
-  doi:    number | null;  // Plating DOI
+  // upstream WIP columns — populated based on selected process:
+  //   Plate: mold=PMC, mark=Mark, reflow=Reflow, wip=Plate, doi=PlateDOI
+  //   Mold:  mold=Staging, wip=MoldWIP, doi=MoldDOI
+  //   Mark:  mold=MoldWIP, mark=MarkWIP, wip=MarkWIP, doi=MarkDOI
+  mold:   number | null;
+  mark:   number | null;
+  reflow: number | null;
+  wip:    number | null;
+  doi:    number | null;
 }
 
 /** Response from GET /api/wip-history — per-hour WIP snapshots for a shift */

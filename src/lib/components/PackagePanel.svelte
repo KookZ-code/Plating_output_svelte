@@ -10,9 +10,36 @@
     rows: PlatingPackageRow[] | null;
     hour: number | null;
     selectedPkg: string | null;
+    process: string;
     onSelect: (pkg: string) => void;
   };
-  const { rows, hour, selectedPkg, onSelect }: Props = $props();
+  const { rows, hour, selectedPkg, process, onSelect }: Props = $props();
+
+  // Column config per process
+  const colCfg = $derived(() => {
+    if (process === 'Mold') return {
+      moldLabel: 'Staging',   showMold: true,
+      markLabel: '',          showMark: false,
+                              showReflow: false,
+      wipLabel:  'Mold WIP',  showWip: true,
+      grid: '72px 1fr 72px 72px 44px 72px 72px 56px',
+    };
+    if (process === 'Mark') return {
+      moldLabel: 'Mold WIP',  showMold: true,
+      markLabel: 'Mark WIP',  showMark: true,
+                              showReflow: false,
+      wipLabel:  '',          showWip: false,
+      grid: '72px 1fr 72px 72px 44px 72px 72px 56px',
+    };
+    // Plate (default)
+    return {
+      moldLabel: 'Post Mold', showMold: true,
+      markLabel: 'Mark',      showMark: true,
+                              showReflow: true,
+      wipLabel:  'Plate WIP', showWip: true,
+      grid: '72px 1fr 72px 72px 62px 72px 44px 72px 72px 56px',
+    };
+  });
 
   let sortCol = $state<SortCol>('output');
   let sortAsc = $state(false);
@@ -60,13 +87,21 @@
   <div class="active">
     <div class="label">▼ {hour}:00 hr — by Package</div>
 
-    <div class="ph-row">
+    <div class="ph-row" style:grid-template-columns={colCfg().grid}>
       <button class="ph-sort" onclick={() => toggleSort('package')}>Package{si('package')}</button>
       <div class="ph-bar"></div>
-      <button class="ph-sort ph-r" onclick={() => toggleSort('mold')}>Post Mold{si('mold')}</button>
-      <button class="ph-sort ph-r" onclick={() => toggleSort('mark')}>Mark{si('mark')}</button>
-      <button class="ph-sort ph-r" onclick={() => toggleSort('reflow')}>Reflow{si('reflow')}</button>
-      <button class="ph-sort ph-r" onclick={() => toggleSort('wip')}>Plate WIP{si('wip')}</button>
+      {#if colCfg().showMold}
+        <button class="ph-sort ph-r" onclick={() => toggleSort('mold')}>{colCfg().moldLabel}{si('mold')}</button>
+      {/if}
+      {#if colCfg().showMark}
+        <button class="ph-sort ph-r" onclick={() => toggleSort('mark')}>{colCfg().markLabel}{si('mark')}</button>
+      {/if}
+      {#if colCfg().showReflow}
+        <button class="ph-sort ph-r" onclick={() => toggleSort('reflow')}>Reflow{si('reflow')}</button>
+      {/if}
+      {#if colCfg().showWip}
+        <button class="ph-sort ph-r" onclick={() => toggleSort('wip')}>{colCfg().wipLabel}{si('wip')}</button>
+      {/if}
       <button class="ph-sort ph-r" onclick={() => toggleSort('doi')}>DOI{si('doi')}</button>
       <button class="ph-sort ph-r" onclick={() => toggleSort('planPerShift')}>Plan/Shift{si('planPerShift')}</button>
       <button class="ph-sort ph-r" onclick={() => toggleSort('output')}>Output{si('output')}</button>
@@ -79,6 +114,7 @@
           type="button"
           class="row"
           class:selected={r.package === selectedPkg}
+          style:grid-template-columns={colCfg().grid}
           onclick={() => onSelect(r.package)}
         >
           <div class="pkg">{r.package}</div>
@@ -90,10 +126,18 @@
             ></div>
             <div class="bar-target-line"></div>
           </div>
-          <div class="num">{r.mold   != null ? fmtInt(r.mold)   : '—'}</div>
-          <div class="num">{r.mark   != null ? fmtInt(r.mark)   : '—'}</div>
-          <div class="num">{r.reflow != null ? fmtInt(r.reflow) : '—'}</div>
-          <div class="num">{r.wip    != null ? fmtInt(r.wip)    : '—'}</div>
+          {#if colCfg().showMold}
+            <div class="num">{r.mold   != null ? fmtInt(r.mold)   : '—'}</div>
+          {/if}
+          {#if colCfg().showMark}
+            <div class="num">{r.mark   != null ? fmtInt(r.mark)   : '—'}</div>
+          {/if}
+          {#if colCfg().showReflow}
+            <div class="num">{r.reflow != null ? fmtInt(r.reflow) : '—'}</div>
+          {/if}
+          {#if colCfg().showWip}
+            <div class="num">{r.wip    != null ? fmtInt(r.wip)    : '—'}</div>
+          {/if}
           <div class="num" class:doi-low={r.doi != null && r.doi < 1}>{r.doi != null ? r.doi.toFixed(1) : '—'}</div>
           <div class="num">{r.planPerShift > 0 ? fmtInt(r.planPerShift) : '—'}</div>
           <div class="num strong">{fmtInt(r.output)}</div>
@@ -117,13 +161,21 @@
         {@const totTarget = sorted.reduce((s, r) => s + r.target, 0)}
         {@const totPct    = totTarget > 0 ? ((totOutput - totTarget) / totTarget) * 100 : 0}
         {@const totDoi    = totPlan > 0 ? totWip / (totPlan * 2) : null}
-        <div class="total-row">
+        <div class="total-row" style:grid-template-columns={colCfg().grid}>
           <div class="tot-label">Total</div>
           <div></div>
-          <div class="tot-num">{totMold   > 0 ? fmtInt(totMold)   : '—'}</div>
-          <div class="tot-num">{totMark   > 0 ? fmtInt(totMark)   : '—'}</div>
-          <div class="tot-num">{totReflow > 0 ? fmtInt(totReflow) : '—'}</div>
-          <div class="tot-num">{totWip    > 0 ? fmtInt(totWip)    : '—'}</div>
+          {#if colCfg().showMold}
+            <div class="tot-num">{totMold   > 0 ? fmtInt(totMold)   : '—'}</div>
+          {/if}
+          {#if colCfg().showMark}
+            <div class="tot-num">{totMark   > 0 ? fmtInt(totMark)   : '—'}</div>
+          {/if}
+          {#if colCfg().showReflow}
+            <div class="tot-num">{totReflow > 0 ? fmtInt(totReflow) : '—'}</div>
+          {/if}
+          {#if colCfg().showWip}
+            <div class="tot-num">{totWip    > 0 ? fmtInt(totWip)    : '—'}</div>
+          {/if}
           <div class="tot-num" class:doi-low={totDoi != null && totDoi < 1}>{totDoi != null ? totDoi.toFixed(1) : '—'}</div>
           <div class="tot-num">{totPlan   > 0 ? fmtInt(totPlan)   : '—'}</div>
           <div class="tot-num">{fmtInt(totOutput)}</div>
@@ -170,7 +222,6 @@
 
   .total-row {
     display: grid;
-    grid-template-columns: 72px 1fr 72px 72px 62px 72px 44px 72px 72px 56px;
     align-items: center;
     gap: 10px;
     font-size: 12px;
@@ -187,7 +238,6 @@
   .ph-row,
   .row {
     display: grid;
-    grid-template-columns: 72px 1fr 72px 72px 62px 72px 44px 72px 72px 56px;
     align-items: center;
     gap: 10px;
     font-size: 12px;

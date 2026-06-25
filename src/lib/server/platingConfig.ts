@@ -20,12 +20,16 @@ export function getLotApiUrl(): string {
   );
 }
 
-/** Machine list API — returns all Plate machines */
+/** Machine list API — returns all machines for the given process */
+export function getMachineListUrlForProcess(process: string): string {
+  const base = env.PLATING_MC_LIST_BASE_URL
+    ?? 'http://mth-sv-assykam/assyapi/api/a6s/listMConProcess';
+  return `${base}?Process=${encodeURIComponent(process)}`;
+}
+
+/** @deprecated use getMachineListUrlForProcess */
 export function getMachineListUrl(): string {
-  return (
-    env.PLATING_MC_LIST_URL ??
-    'http://mth-sv-assykam/assyapi/api/a6s/listMConProcess?Process=Plate'
-  );
+  return env.PLATING_MC_LIST_URL ?? getMachineListUrlForProcess('Plate');
 }
 
 export function getApiTimeout(): number {
