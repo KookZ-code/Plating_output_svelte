@@ -40,8 +40,13 @@
     cutoffIndex: number;
     onSelectHour: (hour: number) => void;
     wipHistory: WipHistoryResponse | null;
+    process: string;
   };
-  const { hourly, title, cutoffIndex, onSelectHour, wipHistory }: Props = $props();
+  const { hourly, title, cutoffIndex, onSelectHour, wipHistory, process }: Props = $props();
+
+  const wipLabel = $derived(
+    process === 'Mold' ? 'Mold WIP' : process === 'Mark' ? 'Mark WIP' : 'Plate WIP'
+  );
 
   const PKG_COLORS = [
     '#157EAC', '#41B6E6', '#6CC24A', '#9CD584',
@@ -120,7 +125,7 @@
   const wipLabelsPlugin: Plugin<'bar'> = {
     id: 'wipLabels',
     afterDatasetsDraw(c: ChartType) {
-      const wipIdx = c.data.datasets.findIndex((d) => d.label === 'Plate WIP');
+      const wipIdx = c.data.datasets.findIndex((d) => (d as { yAxisID?: string }).yAxisID === 'y2');
       if (wipIdx === -1) return;
       const doiArr = (c.data.datasets[wipIdx] as { doi?: (number | null)[] }).doi;
       const meta = c.getDatasetMeta(wipIdx);
@@ -198,7 +203,7 @@
       if (totals.some((v) => v != null)) {
         datasets.push({
           type: 'line',
-          label: 'Plate WIP',
+          label: wipLabel,
           data: totals,
           borderColor: WIP_COLOR,
           backgroundColor: 'rgba(123,92,176,0.08)',
@@ -285,7 +290,7 @@
             },
             title: {
               display: true,
-              text: 'Plate WIP',
+              text: wipLabel,
               font: { size: 11, family: "'Open Sans', sans-serif" },
               color: WIP_COLOR,
             },
@@ -320,6 +325,12 @@
       const cfg = buildConfig(hourly, wipHistory);
       chart.data.labels = cfg.data.labels;
       chart.data.datasets = cfg.data.datasets;
+      // Update y2 axis title and display when process (wipLabel) changes
+      const y2 = chart.options.scales?.['y2'] as { display?: boolean; title?: { text?: string } } | undefined;
+      if (y2) {
+        y2.display = cfg.options?.scales?.['y2']?.display as boolean ?? false;
+        if (y2.title) y2.title.text = wipLabel;
+      }
       chart.update('none');
     }
   });

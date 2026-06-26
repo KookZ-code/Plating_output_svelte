@@ -36,7 +36,7 @@ export interface A01Val {
 export interface A01Data {
   byNorm: Map<string, A01Val>;        // normalised pkg name → values
   totalDailyPlan: number;             // sum of Plan across all rows
-  rows: Array<{ pkg: string; plan: number }>; // ordered list (A01 sequence)
+  rows: Array<{ pkg: string; plan: number; name: string }>; // ordered (A01 seq), name = original A01 label
 }
 
 const TTL_MS = 60_000;
@@ -69,8 +69,12 @@ export function normPkg(s: string): string {
     .toUpperCase()
     .replace(/\(.*?\)/g, '')                    // drop MPC variant "(2LX)"
     .replace(/SOT-?23/gi, 'SOT')                // SOT-23 → SOT
+    .replace(/SOIJ/g, 'EIAJ')                  // lot "8SOIJ" = A01 "8L EIAJ"
     .replace(/\b(\d+)L\b/g, '$1')              // "8L" → "8"
-    .replace(/\b\d+[Xx]\d+(?:\.\d+)?\w*\b/g, '') // strip size specs: "3X3", "4X4W", "7.5X7.5", "10X10"
+    .replace(/\b\d+[Xx]\d+(?:\.\d+)?\w*\b/g, '') // strip size specs: "3X3", "4X4W", "7.5X7.5"
+    // Note: HD, UDLF, IDF, UP are NOT stripped — A01 variants show as separate rows.
+    // Lot records never include these suffixes so their output will be 0,
+    // but WIP/DOI/Plan per variant is preserved from A01.
     .replace(/[^A-Z0-9]/g, '');                 // drop spaces/dashes/dots
 }
 
@@ -112,10 +116,12 @@ export async function fetchA01(): Promise<A01Data> {
     const mark    = r.Mark     ?? 0;
     const markDoi = r.MarkDOI  ?? 0;
     const reflow  = r.Reflow   ?? 0;
-    const wip     = r.Plate    ?? 0;
-    const doi     = r.PlateDOI ?? 0;
+    // QFN/VQFN/SQFN packages have incorrect Plate WIP in A01 — exclude them
+    const isQfn = /QFN|VQFN|SQFN/i.test(r.Package);
+    const wip     = isQfn ? 0 : (r.Plate    ?? 0);
+    const doi     = isQfn ? 0 : (r.PlateDOI ?? 0);
     totalDailyPlan += plan;
-    orderedRows.push({ pkg: normPkg(r.Package), plan });
+    orderedRows.push({ pkg: normPkg(r.Package), plan, name: r.Package.trim() });
 
     const nk = normPkg(r.Package);
     if (nk) {

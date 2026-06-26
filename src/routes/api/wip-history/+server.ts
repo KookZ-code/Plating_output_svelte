@@ -6,9 +6,10 @@ import { getWipHistory } from '$lib/server/wipStore';
 import type { Shift } from '$lib/types/plating';
 
 export const GET: RequestHandler = async ({ url }) => {
-  const date  = url.searchParams.get('date')  ?? todayStr();
+  const date    = url.searchParams.get('date')    ?? todayStr();
   const shift: Shift = url.searchParams.get('shift') === 'N' ? 'N' : 'D';
-  return json(await getWipHistory(date, shift));
+  const process = url.searchParams.get('process') ?? 'Plate';
+  return json(await getWipHistory(date, shift, process));
 };
 
 function todayStr(): string {

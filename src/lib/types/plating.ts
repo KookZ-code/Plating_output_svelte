@@ -81,6 +81,7 @@ export interface PlatingHourlyResponse {
   pkgReflow:   Record<string, number>;  // normKey → Reflow WIP
   pkgWip:      Record<string, number>;  // normKey → Plate WIP
   pkgDoi:      Record<string, number>;  // normKey → Plate DOI
+  pkgOutput:   Record<string, number[]>; // normKey → plan-proportional cumulative output per hour
   pkgOrder:  string[];                // A01 ordered normKeys (all with plan>0)
   pkgNames:  Record<string, string>;  // normKey → display name from A01
   normToOut: Record<string, string>;  // normKey → outputbymc pkg key (for output lookup)

@@ -4,6 +4,7 @@ import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
 import {
   getLotApiUrl,
+  getPlatingApiUrl,
   getMachineListUrlForProcess,
   getApiTimeout,
   getDefaultProcess,
@@ -11,6 +12,12 @@ import {
   DAY_SHIFT_END,
 } from '$lib/server/platingConfig';
 import { fetchA01, lookupA01, normPkg } from '$lib/server/a01';
+import {
+  MOLD_VARIANT_RULES,
+  MOLD_LOOKBACK_DAYS,
+  moldMcNumber,
+  specialMoldMcNumbers,
+} from '$lib/server/moldVariantConfig';
 import type {
   PlatingLotApiResponse,
   PlatingLotRecord,
@@ -81,6 +88,70 @@ export const GET: RequestHandler = async ({ url }) => {
     .filter((r): r is PromiseFulfilledResult<PlatingLotRecord[]> => r.status === 'fulfilled')
     .flatMap((r) => r.value);
 
+  // ── Step 2b: build LOTID → A01 normKey map from Mold machine cross-reference ──
+  // Only needed for ambiguous packages (8SOIC, 44TQFP, 64TQFP, 20SSOP).
+  // Fetch lot records from "special" Mold machines (28, 26, 30, 32, 27) going back
+  // MOLD_LOOKBACK_DAYS days to cover the Mold→Plate transit time.
+  const lotIdToVariantNk = new Map<string, string>(); // LOTID → A01 normKey
+
+  // Collect ambiguous lot normKeys present in this batch
+  const ambiguousNks = new Set(MOLD_VARIANT_RULES.map((r) => r.lotNk));
+  const hasAmbiguous = allRecords.some((r) => ambiguousNks.has(normPkg(r.PACKAGE ?? '')));
+
+  if (hasAmbiguous) {
+    const moldLotDateF = nDaysBack(date, MOLD_LOOKBACK_DAYS);
+    const moldLotDateT = addOneDay(date);
+    const neededMcNums = specialMoldMcNumbers();
+
+    // Get Mold machine list and filter to special machines only
+    let moldMachines: string[] = [];
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), timeout);
+      const res = await fetch(getMachineListUrlForProcess('Mold'), { signal: ctrl.signal });
+      clearTimeout(t);
+      if (res.ok) {
+        const all = (await res.json()) as string[];
+        moldMachines = all.filter((id) => {
+          const mc = moldMcNumber(id);
+          return mc !== null && neededMcNums.has(mc);
+        });
+      }
+    } catch { /* skip if unavailable */ }
+
+    // Fetch Mold lot records in parallel
+    const moldSettled = await Promise.allSettled(
+      moldMachines.map(async (machine) => {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), timeout);
+        try {
+          const res = await fetch(
+            `${lotApiBase}?machine=${encodeURIComponent(machine)}&dateF=${moldLotDateF}&dateT=${moldLotDateT}`,
+            { signal: ctrl.signal }
+          );
+          if (!res.ok) return { machine, lots: [] as PlatingLotRecord[] };
+          const d = (await res.json()) as PlatingLotApiResponse;
+          return { machine, lots: d.data ?? [] };
+        } finally { clearTimeout(t); }
+      })
+    );
+
+    // Build LOTID → variantNk from Mold lot records
+    for (const result of moldSettled) {
+      if (result.status !== 'fulfilled') continue;
+      const { machine, lots } = result.value;
+      const mc = moldMcNumber(machine);
+      if (mc === null) continue;
+      for (const lot of lots) {
+        const lotNk = normPkg(lot.PACKAGE ?? '');
+        const rule = MOLD_VARIANT_RULES.find(
+          (r) => r.lotNk === lotNk && r.mcNumbers.includes(mc)
+        );
+        if (rule) lotIdToVariantNk.set(lot.LOTID, rule.variantNk);
+      }
+    }
+  }
+
   // ── Step 3: build shift hour buckets ───────────────────────────────────
   const hours = buildHourLabels(shift);
   const shiftHours = getShiftHours(shift);
@@ -111,18 +182,23 @@ export const GET: RequestHandler = async ({ url }) => {
       : (hour < nightBreak ? date : subtractOneDay(date)); // Night: 0-6 on date, 19-23 on date-1
     if (recDate !== expectedDate) continue;
 
-    const pkg = rec.PACKAGE;
+    // Use Mold cross-reference to exact-identify variant; fallback to lot PACKAGE name
+    const pkgNk = normPkg(rec.PACKAGE ?? '');
+    const bucketKey = (lotIdToVariantNk.has(rec.LOTID) && ambiguousNks.has(pkgNk))
+      ? lotIdToVariantNk.get(rec.LOTID)!   // exact variant normKey from Mold machine
+      : rec.PACKAGE;                         // original lot PACKAGE (base or unambiguous)
+
     const qty = rec.QTY ?? 0;
 
     // hourly buckets
-    if (!buckets[pkg]) buckets[pkg] = Array(hours.length).fill(0) as number[];
-    buckets[pkg][idx] += qty;
+    if (!buckets[bucketKey]) buckets[bucketKey] = Array(hours.length).fill(0) as number[];
+    buckets[bucketKey][idx] += qty;
 
     // machine-level totals
     const machine = rec.EQUIP ?? '';
     if (machine) {
       if (!machineOutput[machine]) machineOutput[machine] = {};
-      machineOutput[machine][pkg] = (machineOutput[machine][pkg] ?? 0) + qty;
+      machineOutput[machine][bucketKey] = (machineOutput[machine][bucketKey] ?? 0) + qty;
 
       if (!machineBuckets[machine]) machineBuckets[machine] = Array(hours.length).fill(0) as number[];
       machineBuckets[machine][idx] += qty;
@@ -170,7 +246,7 @@ export const GET: RequestHandler = async ({ url }) => {
     targetPerShift = Math.round(a01.totalDailyPlan / 2);
 
     // Iterate ALL A01 packages in sequence order, include those with plan > 0
-    for (const { pkg: nk, plan } of a01.rows) {
+    for (const { pkg: nk, plan, name: a01Name } of a01.rows) {
       if (plan <= 0) continue; // skip zero-plan packages
       if (pkgOrder.includes(nk)) continue; // dedup (multiple A01 rows same normKey)
       pkgOrder.push(nk);
@@ -188,16 +264,13 @@ export const GET: RequestHandler = async ({ url }) => {
         if (val.wip     > 0) pkgWip[nk]     = val.wip;
         if (val.doi     > 0) pkgDoi[nk]     = val.doi;
       }
-      // Map normKey to outputbymc package name for output lookup
-      const outPkg = outByNorm.get(nk);
+      // Display name = A01 original package name (e.g. "44L TQFP HD")
+      pkgNames[nk] = a01Name;
+      // Map normKey to outputbymc package name — try direct match first,
+      // then stripped (HD/UDLF/IDF removed) so variants share the lot's machine output.
+      const stripped = nk.replace(/HD|UDLF|UP|IDF/g, '');
+      const outPkg = outByNorm.get(nk) ?? outByNorm.get(stripped);
       if (outPkg) normToOut[nk] = outPkg;
-    }
-
-    // Also populate pkgNames using A01 row names (first occurrence wins)
-    // We rebuild pkgNames from rawRows via a01.rows pkg field (normKey as-is)
-    // For display: use the outputbymc name if matched, otherwise use normKey
-    for (const nk of pkgOrder) {
-      pkgNames[nk] = normToOut[nk] ?? nk;
     }
 
     // Also add packages that have output but no A01 entry (edge case)
@@ -219,12 +292,75 @@ export const GET: RequestHandler = async ({ url }) => {
     }
   }
 
+  // ── pkgOutput: actual-ratio output per A01 normKey ───────────────────────
+  // OutputByMachine has full PKGCODE names (e.g. "44L TQFP HD") so we can
+  // compute REAL output ratios between variants sharing the same lot normKey.
+  const pkgOutput: Record<string, number[]> = {};
+
+  // Fetch OutputByMachine to get actual per-PKGCODE output for this shift
+  const obmQty = new Map<string, number>(); // normPkg(PKGCODE) → qty for shift
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeout);
+    const lotDateF = subtractOneDay(date);
+    const lotDateT = addOneDay(date);
+    const res = await fetch(getPlatingApiUrl(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ DateStart: lotDateF, DateEnd: lotDateT,
+        Process: activeProcess, Site: site }),
+      signal: ctrl.signal,
+    });
+    clearTimeout(t);
+    if (res.ok) {
+      const d = (await res.json()) as { data?: { PKGCODE: string; QTY_Day: number; QTY_Night: number }[] };
+      const isDay = shift === 'D';
+      for (const row of d.data ?? []) {
+        const nk = normPkg(row.PKGCODE ?? '');
+        if (!nk) continue;
+        const qty = (isDay ? row.QTY_Day : row.QTY_Night) ?? 0;
+        obmQty.set(nk, (obmQty.get(nk) ?? 0) + qty);
+      }
+    }
+  } catch { /* fallback to plan-proportional below */ }
+
+  // stripped normKey: remove HD/UDLF/UP to find the base lot pkg
+  const stripVariant = (nk: string) => nk.replace(/HD|UDLF|UP|IDF/g, '');
+
+  // Group A01 normKeys by their lot pkg
+  const lotPkgVariants = new Map<string, Array<{ nk: string; qty: number; plan: number }>>();
+  for (const nk of pkgOrder) {
+    const plan = pkgPlans[nk] ?? 0;
+    if (plan <= 0) continue;
+    const stripped = stripVariant(nk);
+    const lotPkg = normToOut[nk] ?? (outByNorm.get(stripped) ? outByNorm.get(stripped)! : undefined);
+    if (!lotPkg || !packages[lotPkg]) continue;
+    if (!lotPkgVariants.has(lotPkg)) lotPkgVariants.set(lotPkg, []);
+    // Prefer actual OutputByMachine qty; fall back to plan
+    const qty = obmQty.get(nk) ?? plan;
+    lotPkgVariants.get(lotPkg)!.push({ nk, qty, plan });
+  }
+
+  for (const [lotPkg, variants] of lotPkgVariants) {
+    const lotCum = packages[lotPkg];
+    if (!lotCum) continue;
+    if (variants.length === 1) {
+      pkgOutput[variants[0].nk] = lotCum;
+    } else {
+      const totalQty = variants.reduce((s, v) => s + v.qty, 0);
+      for (const { nk, qty } of variants) {
+        const ratio = totalQty > 0 ? qty / totalQty : 1 / variants.length;
+        pkgOutput[nk] = lotCum.map((v) => Math.round(v * ratio));
+      }
+    }
+  }
+
   const target_cumulative =
     targetPerShift > 0
       ? hours.map((_, i) => Math.round((targetPerShift / hours.length) * (i + 1)))
       : hours.map(() => 0);
 
-  return json({ hours, packages, target_cumulative, machineOutput, machineHourly, pkgPlans, pkgStaging, pkgMoldWip, pkgMoldDoi, pkgMold, pkgMark, pkgMarkDoi, pkgReflow, pkgWip, pkgDoi, pkgOrder, pkgNames, normToOut } satisfies PlatingHourlyResponse);
+  return json({ hours, packages, target_cumulative, machineOutput, machineHourly, pkgPlans, pkgStaging, pkgMoldWip, pkgMoldDoi, pkgMold, pkgMark, pkgMarkDoi, pkgReflow, pkgWip, pkgDoi, pkgOutput, pkgOrder, pkgNames, normToOut } satisfies PlatingHourlyResponse);
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -290,6 +426,12 @@ function parseHour(ts: string): number | null {
   return null;
 }
 
+function nDaysBack(dateStr: string, n: number): string {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const prev = new Date(y, m - 1, d - n);
+  return [prev.getFullYear(), String(prev.getMonth()+1).padStart(2,'0'), String(prev.getDate()).padStart(2,'0')].join('-');
+}
+
 function subtractOneDay(dateStr: string): string {
   const [y, m, d] = dateStr.split('-').map(Number);
   const prev = new Date(y, m - 1, d - 1);
@@ -312,5 +454,5 @@ function addOneDay(dateStr: string): string {
 
 function emptyHourly(shift: Shift): PlatingHourlyResponse {
   const hours = buildHourLabels(shift);
-  return { hours, packages: {}, target_cumulative: hours.map(() => 0), machineOutput: {}, machineHourly: {}, pkgPlans: {}, pkgStaging: {}, pkgMoldWip: {}, pkgMoldDoi: {}, pkgMold: {}, pkgMark: {}, pkgMarkDoi: {}, pkgReflow: {}, pkgWip: {}, pkgDoi: {}, pkgOrder: [], pkgNames: {}, normToOut: {} };
+  return { hours, packages: {}, target_cumulative: hours.map(() => 0), machineOutput: {}, machineHourly: {}, pkgPlans: {}, pkgStaging: {}, pkgMoldWip: {}, pkgMoldDoi: {}, pkgMold: {}, pkgMark: {}, pkgMarkDoi: {}, pkgReflow: {}, pkgWip: {}, pkgDoi: {}, pkgOutput: {}, pkgOrder: [], pkgNames: {}, normToOut: {} };
 }

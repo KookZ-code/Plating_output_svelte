@@ -14,7 +14,11 @@ interface WipSnapshot {
   date: string;      // local YYYY-MM-DD
   hour: number;      // local 0-23
   pkgWip: Record<string, number>;  // normKey → Plate WIP
-  totalDoi?: number; // total Plate DOI = totalWip / totalDailyPlan
+  totalDoi?: number; // total Plate DOI
+  totMoldWip?: number;  // total Mold WIP across all packages
+  totMarkWip?: number;  // total Mark WIP across all packages
+  moldTotalDoi?: number;
+  markTotalDoi?: number;
 }
 
 const KEEP_DAYS = 30;
@@ -65,11 +69,18 @@ export async function takeWipSnapshot(): Promise<void> {
   try {
     const a01 = await fetchA01();
     const pkgWip: Record<string, number> = {};
+    let totMoldWip = 0;
+    let totMarkWip = 0;
     for (const [nk, val] of a01.byNorm) {
-      if (val.wip > 0) pkgWip[nk] = val.wip;
+      if (val.wip     > 0) pkgWip[nk] = val.wip;
+      if (val.moldWip > 0) totMoldWip += val.moldWip;
+      if (val.mark    > 0) totMarkWip += val.mark;
     }
     const totalWip = Object.values(pkgWip).reduce((s, v) => s + v, 0);
-    const totalDoi = a01.totalDailyPlan > 0 ? totalWip / a01.totalDailyPlan : 0;
+    const plan = a01.totalDailyPlan;
+    const totalDoi    = plan > 0 ? totalWip  / plan : 0;
+    const moldTotalDoi = plan > 0 ? totMoldWip / plan : 0;
+    const markTotalDoi = plan > 0 ? totMarkWip / plan : 0;
 
     const now = new Date();
     // Add 30s before reading hour so a timer that fires at 12:59:58
@@ -81,6 +92,10 @@ export async function takeWipSnapshot(): Promise<void> {
       hour: snapped.getHours(),
       pkgWip,
       totalDoi,
+      totMoldWip,
+      totMarkWip,
+      moldTotalDoi,
+      markTotalDoi,
     };
 
     const p = storePath();
@@ -115,7 +130,7 @@ export function startWipPoller(): void {
 
 // ── Public: query history for a shift ─────────────────────────────────────
 
-export async function getWipHistory(date: string, shift: Shift): Promise<WipHistoryResponse> {
+export async function getWipHistory(date: string, shift: Shift, process = 'Plate'): Promise<WipHistoryResponse> {
   const shiftHours: number[] =
     shift === 'D'
       ? Array.from({ length: DAY_SHIFT_END - DAY_SHIFT_START }, (_, i) => DAY_SHIFT_START + i)
@@ -140,37 +155,69 @@ export async function getWipHistory(date: string, shift: Shift): Promise<WipHist
     byKey.set(`${s.date}:${s.hour}`, s);
   }
 
-  // Collect all pkg keys that appear in any relevant snapshot
-  const pkgSet = new Set<string>();
-  for (const h of shiftHours) {
-    const snap = byKey.get(`${expectedDate(h)}:${h}`);
-    if (snap) Object.keys(snap.pkgWip).forEach((k) => pkgSet.add(k));
-  }
-
+  // Build wip and doi based on selected process
   const wip: Record<string, (number | null)[]> = {};
-  for (const pkg of pkgSet) {
-    wip[pkg] = shiftHours.map((h) => {
+
+  if (process === 'Mold') {
+    // Use totMoldWip stored in snapshot; fall back to A01 on-the-fly for old snapshots
+    let plan = 0;
+    try { plan = (await fetchA01()).totalDailyPlan; } catch { /* ignore */ }
+    const totals = shiftHours.map((h) => {
       const snap = byKey.get(`${expectedDate(h)}:${h}`);
-      return snap?.pkgWip[pkg] ?? null;
+      if (!snap) return null;
+      const v = snap.totMoldWip;
+      if (v != null && v > 0) return v;
+      // Old snapshot without totMoldWip — unavailable
+      return null;
     });
+    if (totals.some((v) => v !== null)) wip['__total__'] = totals;
+    const doi: (number | null)[] = shiftHours.map((h) => {
+      const snap = byKey.get(`${expectedDate(h)}:${h}`);
+      if (!snap) return null;
+      const v = snap.moldTotalDoi ?? (plan > 0 && snap.totMoldWip ? snap.totMoldWip / plan : null);
+      return v ?? null;
+    });
+    return { hours, wip, doi };
+
+  } else if (process === 'Mark') {
+    let plan = 0;
+    try { plan = (await fetchA01()).totalDailyPlan; } catch { /* ignore */ }
+    const totals = shiftHours.map((h) => {
+      const snap = byKey.get(`${expectedDate(h)}:${h}`);
+      if (!snap) return null;
+      const v = snap.totMarkWip;
+      return (v != null && v > 0) ? v : null;
+    });
+    if (totals.some((v) => v !== null)) wip['__total__'] = totals;
+    const doi: (number | null)[] = shiftHours.map((h) => {
+      const snap = byKey.get(`${expectedDate(h)}:${h}`);
+      if (!snap) return null;
+      const v = snap.markTotalDoi ?? (plan > 0 && snap.totMarkWip ? snap.totMarkWip / plan : null);
+      return v ?? null;
+    });
+    return { hours, wip, doi };
+
+  } else {
+    // Plate (default) — per-package breakdown
+    const pkgSet = new Set<string>();
+    for (const h of shiftHours) {
+      const snap = byKey.get(`${expectedDate(h)}:${h}`);
+      if (snap) Object.keys(snap.pkgWip).forEach((k) => pkgSet.add(k));
+    }
+    for (const pkg of pkgSet) {
+      wip[pkg] = shiftHours.map((h) => {
+        const snap = byKey.get(`${expectedDate(h)}:${h}`);
+        return snap?.pkgWip[pkg] ?? null;
+      });
+    }
+    let totalDailyPlan = 0;
+    try { totalDailyPlan = (await fetchA01()).totalDailyPlan; } catch { /* ignore */ }
+    const doi: (number | null)[] = shiftHours.map((h) => {
+      const snap = byKey.get(`${expectedDate(h)}:${h}`);
+      if (!snap) return null;
+      const totalWip = Object.values(snap.pkgWip).reduce((s, v) => s + v, 0);
+      return totalDailyPlan > 0 ? totalWip / totalDailyPlan : null;
+    });
+    return { hours, wip, doi };
   }
-
-  // Fetch current A01 plan for DOI computation — works for both old and new snapshots.
-  // Plan is stable enough that using today's plan for historical snapshots is acceptable.
-  let totalDailyPlan = 0;
-  try {
-    const a01 = await fetchA01();
-    totalDailyPlan = a01.totalDailyPlan;
-  } catch {
-    // A01 unavailable — DOI will be null
-  }
-
-  const doi: (number | null)[] = shiftHours.map((h) => {
-    const snap = byKey.get(`${expectedDate(h)}:${h}`);
-    if (!snap) return null;
-    const totalWip = Object.values(snap.pkgWip).reduce((s, v) => s + v, 0);
-    return totalDailyPlan > 0 ? totalWip / totalDailyPlan : null;
-  });
-
-  return { hours, wip, doi };
 }

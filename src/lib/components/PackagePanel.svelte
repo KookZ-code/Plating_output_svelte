@@ -17,27 +17,28 @@
 
   // Column config per process
   const colCfg = $derived(() => {
+    // grid: pkg | bar | wip-cols... | doi | plan | target | output | missing | vspace
     if (process === 'Mold') return {
-      moldLabel: 'Staging',   showMold: true,
-      markLabel: '',          showMark: false,
-                              showReflow: false,
-      wipLabel:  'Mold WIP',  showWip: true,
-      grid: '72px 1fr 72px 72px 44px 72px 72px 56px',
+      moldLabel:   'Staging',  showMold: true,
+      reflowLabel: '',         showReflow: false,
+      markLabel:   '',         showMark: false,
+      wipLabel:    'Mold WIP', showWip: true,
+      grid: '72px 1fr 72px 72px 44px 72px 72px 72px 72px 64px 56px',
     };
     if (process === 'Mark') return {
-      moldLabel: 'Mold WIP',  showMold: true,
-      markLabel: 'Mark WIP',  showMark: true,
-                              showReflow: false,
-      wipLabel:  '',          showWip: false,
-      grid: '72px 1fr 72px 72px 44px 72px 72px 56px',
+      moldLabel:   'Mold WIP',   showMold: true,
+      reflowLabel: 'Post Mold',  showReflow: true,
+      markLabel:   'Mark WIP',   showMark: true,
+      wipLabel:    '',           showWip: false,
+      grid: '72px 1fr 72px 72px 72px 44px 72px 72px 72px 64px 56px',
     };
     // Plate (default)
     return {
-      moldLabel: 'Post Mold', showMold: true,
-      markLabel: 'Mark',      showMark: true,
-                              showReflow: true,
-      wipLabel:  'Plate WIP', showWip: true,
-      grid: '72px 1fr 72px 72px 62px 72px 44px 72px 72px 56px',
+      moldLabel:   'Post Mold', showMold: true,
+      reflowLabel: 'Reflow',    showReflow: true,
+      markLabel:   'Mark',      showMark: true,
+      wipLabel:    'Plate WIP', showWip: true,
+      grid: '72px 1fr 72px 72px 62px 72px 44px 72px 72px 72px 64px 56px',
     };
   });
 
@@ -93,18 +94,20 @@
       {#if colCfg().showMold}
         <button class="ph-sort ph-r" onclick={() => toggleSort('mold')}>{colCfg().moldLabel}{si('mold')}</button>
       {/if}
+      {#if colCfg().showReflow}
+        <button class="ph-sort ph-r" onclick={() => toggleSort('reflow')}>{colCfg().reflowLabel}{si('reflow')}</button>
+      {/if}
       {#if colCfg().showMark}
         <button class="ph-sort ph-r" onclick={() => toggleSort('mark')}>{colCfg().markLabel}{si('mark')}</button>
-      {/if}
-      {#if colCfg().showReflow}
-        <button class="ph-sort ph-r" onclick={() => toggleSort('reflow')}>Reflow{si('reflow')}</button>
       {/if}
       {#if colCfg().showWip}
         <button class="ph-sort ph-r" onclick={() => toggleSort('wip')}>{colCfg().wipLabel}{si('wip')}</button>
       {/if}
       <button class="ph-sort ph-r" onclick={() => toggleSort('doi')}>DOI{si('doi')}</button>
       <button class="ph-sort ph-r" onclick={() => toggleSort('planPerShift')}>Plan/Shift{si('planPerShift')}</button>
+      <button class="ph-sort ph-r" onclick={() => toggleSort('target')}>Target{si('target')}</button>
       <button class="ph-sort ph-r" onclick={() => toggleSort('output')}>Output{si('output')}</button>
+      <div class="ph-r">Missing</div>
       <button class="ph-sort ph-r" onclick={() => toggleSort('pct')}>vs Pace{si('pct')}</button>
     </div>
 
@@ -129,18 +132,26 @@
           {#if colCfg().showMold}
             <div class="num">{r.mold   != null ? fmtInt(r.mold)   : '—'}</div>
           {/if}
-          {#if colCfg().showMark}
-            <div class="num">{r.mark   != null ? fmtInt(r.mark)   : '—'}</div>
-          {/if}
           {#if colCfg().showReflow}
             <div class="num">{r.reflow != null ? fmtInt(r.reflow) : '—'}</div>
+          {/if}
+          {#if colCfg().showMark}
+            <div class="num">{r.mark   != null ? fmtInt(r.mark)   : '—'}</div>
           {/if}
           {#if colCfg().showWip}
             <div class="num">{r.wip    != null ? fmtInt(r.wip)    : '—'}</div>
           {/if}
           <div class="num" class:doi-low={r.doi != null && r.doi < 1}>{r.doi != null ? r.doi.toFixed(1) : '—'}</div>
           <div class="num">{r.planPerShift > 0 ? fmtInt(r.planPerShift) : '—'}</div>
+          <div class="num muted">{r.target > 0 ? fmtInt(r.target) : '—'}</div>
           <div class="num strong">{fmtInt(r.output)}</div>
+          <div class="num missing">
+            {#if r.target > 0 && r.output < r.target}
+              -{fmtInt(r.target - r.output)}
+            {:else}
+              —
+            {/if}
+          </div>
           <div class="pct" style:color={paceColor(r)}>
             {r.target > 0 ? fmtSignedPct(r.pct, 1) : '—'}
           </div>
@@ -167,18 +178,22 @@
           {#if colCfg().showMold}
             <div class="tot-num">{totMold   > 0 ? fmtInt(totMold)   : '—'}</div>
           {/if}
-          {#if colCfg().showMark}
-            <div class="tot-num">{totMark   > 0 ? fmtInt(totMark)   : '—'}</div>
-          {/if}
           {#if colCfg().showReflow}
             <div class="tot-num">{totReflow > 0 ? fmtInt(totReflow) : '—'}</div>
+          {/if}
+          {#if colCfg().showMark}
+            <div class="tot-num">{totMark   > 0 ? fmtInt(totMark)   : '—'}</div>
           {/if}
           {#if colCfg().showWip}
             <div class="tot-num">{totWip    > 0 ? fmtInt(totWip)    : '—'}</div>
           {/if}
           <div class="tot-num" class:doi-low={totDoi != null && totDoi < 1}>{totDoi != null ? totDoi.toFixed(1) : '—'}</div>
           <div class="tot-num">{totPlan   > 0 ? fmtInt(totPlan)   : '—'}</div>
+          <div class="tot-num muted">{totTarget > 0 ? fmtInt(totTarget) : '—'}</div>
           <div class="tot-num">{fmtInt(totOutput)}</div>
+          <div class="tot-num missing">
+            {totTarget > 0 && totOutput < totTarget ? '-' + fmtInt(totTarget - totOutput) : '—'}
+          </div>
           <div class="tot-pct" style:color={totPct >= 0 ? 'var(--color-accent-green)' : 'var(--color-brand-red)'}>
             {totTarget > 0 ? fmtSignedPct(totPct, 1) : '—'}
           </div>
@@ -314,6 +329,7 @@
   }
   .num.strong { color: var(--color-text-body); font-weight: 700; }
   .pct { text-align: right; font-weight: 600; font-feature-settings: 'tnum'; }
+  .missing { text-align: right; color: var(--color-brand-red); font-weight: 600; font-feature-settings: 'tnum'; font-size: 11px; }
   .empty {
     text-align: center;
     color: var(--color-text-disabled);

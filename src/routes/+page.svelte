@@ -158,7 +158,7 @@
           body: JSON.stringify({ DateStart: date, DateEnd: date, Process: process, Site: site, shift }),
         }),
         fetch(`${base}/api/plating/hourly?date=${date}&shift=${shift}&process=${encodeURIComponent(process)}&site=${encodeURIComponent(site)}`),
-        fetch(`${base}/api/wip-history?date=${date}&shift=${shift}`),
+        fetch(`${base}/api/wip-history?date=${date}&shift=${shift}&process=${encodeURIComponent(process)}`),
         fetch(`${base}/api/plating/machine-status?date=${date}&shift=${shift}&process=${encodeURIComponent(process)}`),
       ]);
 
@@ -231,8 +231,9 @@
       return nk;
     })).map((nk) => {
       const displayName = hourly!.pkgNames[nk] ?? nk;
-      const outKey = hourly!.normToOut[nk];                          // outputbymc pkg key
-      const output = outKey ? (hourly!.packages[outKey]?.[idx] ?? 0) : 0;
+      // Use plan-proportional output if available (handles HD/UDLF variants)
+      const output = hourly!.pkgOutput[nk]?.[idx]
+        ?? (hourly!.normToOut[nk] ? (hourly!.packages[hourly!.normToOut[nk]]?.[idx] ?? 0) : 0);
       const planPerShift = hourly!.pkgPlans[nk] ?? 0;
       const target = planPerShift > 0 ? Math.round(planPerShift * elapsed / totalHours) : 0;
       const pct = target > 0 ? ((output - target) / target) * 100 : 0;
@@ -247,8 +248,8 @@
         doi    = hourly!.pkgMoldDoi[nk]  ?? null;
       } else if (process === 'Mark') {
         mold   = hourly!.pkgMoldWip[nk]  ?? null;  // Mold WIP (before Mark)
+        reflow = hourly!.pkgMold[nk]     ?? null;  // Post Mold (PMC) WIP
         mark   = hourly!.pkgMark[nk]     ?? null;  // Mark WIP (target)
-        reflow = null;
         wip    = null;
         doi    = hourly!.pkgMarkDoi[nk]  ?? null;
       } else {
@@ -298,14 +299,23 @@
     selectedMachine = null;
     if (!hourly) { machineRows = []; return; }
 
-    // Find outputbymc key for this package (pkg may be display name or normKey)
-    // Try normToOut reverse lookup: find normKey whose pkgNames[nk] === pkg
+    // Find A01 normKey and lot output key for this package
     const nk = Object.entries(hourly.pkgNames).find(([, name]) => name === pkg)?.[0] ?? pkg;
     const outKey = hourly.normToOut[nk] ?? pkg;
 
-    // Build rows from machineOutput: machineId → output for this package
+    // Compute variant ratio: pkgOutput[nk] / packages[outKey] at last available hour
+    // This distributes shared lot machine output proportionally (e.g. HD vs non-HD)
+    const lastIdx = hourly.hours.length - 1;
+    const variantTotal = hourly.pkgOutput[nk]?.[lastIdx] ?? null;
+    const lotTotal = hourly.packages[outKey]?.[lastIdx] ?? 0;
+    const variantRatio = (variantTotal !== null && lotTotal > 0) ? variantTotal / lotTotal : 1;
+
+    // Build rows from machineOutput scaled by variant ratio
     const entries = Object.entries(hourly.machineOutput)
-      .map(([machineId, pkgs]) => ({ machineId, output: pkgs[outKey] ?? 0 }))
+      .map(([machineId, pkgs]) => ({
+        machineId,
+        output: Math.round((pkgs[outKey] ?? 0) * variantRatio),
+      }))
       .filter((r) => r.output > 0)
       .sort((a, b) => b.output - a.output);
 
@@ -403,6 +413,7 @@
   cutoffIndex={cutoffIndex()}
   onSelectHour={selectHour}
   {wipHistory}
+  {process}
 />
 
 <section class="drill-row">
